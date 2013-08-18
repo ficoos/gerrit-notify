@@ -229,6 +229,14 @@ def configure_service():
             inp = raw_input("%s [%s]: " % (key, value))
             inp = inp.strip()
             if inp:
+                if inp in ["None", -1]:
+                    inp = None
+                elif key in ["check_interval", "notification_timeout"]:
+                    try:
+                        inp = int(inp)
+                    except ValueError:
+                        print "Key %s must be an integer" % key
+                        continue
                 conf[key] = inp
 
             end_val = conf[key]
