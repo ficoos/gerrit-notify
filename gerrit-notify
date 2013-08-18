@@ -96,9 +96,8 @@ def get_changes(base_url, query):
 
 
 def save_time_stamp(ts):
-    #with open(TS_FILE, "w+") as f:
-    #    f.write(date_to_string(ts))
-    pass
+    with open(TS_FILE, "w+") as f:
+        f.write(date_to_string(ts))
 
 
 def load_time_stamp():
