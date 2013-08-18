@@ -1,0 +1,251 @@
+#!/usr/bin/python
+from python_rest_client.restful_lib import Connection
+import json
+import datetime
+import os
+import sys
+from operator import itemgetter
+from itertools import ifilter
+import errno
+import pwd
+import pynotify
+import subprocess
+import gobject
+import glib
+
+AUTOSTART_PATH = os.path.realpath(
+    os.path.expanduser("~/.config/autostart/gerrit-notify.desktop"))
+
+
+AUTOSTART_ENTRY = """
+[Desktop Entry]
+Type=Application
+Exec=%s
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name[en_US]=gerrit-notify
+Name=gerrit-notify
+Comment[en_US]=Gerrit Notification
+Comment=Gerrit Notificaton
+""" % os.path.realpath(__file__)
+
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+TS_FILE = os.path.realpath(
+    os.path.expanduser("~/.config/gerrit-notify/last_timestamp"))
+CONFIG_FILE = os.path.realpath(
+    os.path.expanduser("~/.config/gerrit-notify/config"))
+
+DEFAULT_CONFIG = {
+    "user": pwd.getpwuid(os.getuid()).pw_name,
+    "query": "(owner:{user} OR reviewer:{user}) AND age:<1w",
+    "check_interval": 5,
+    "notification_timeout": 5,
+    "base_url": None}
+
+
+def create_config_dir():
+    try:
+        os.makedirs(os.path.dirname(TS_FILE))
+    except (OSError, IOError) as e:
+        if e.errno != errno.EEXIST:
+            raise
+
+
+def load_config():
+    conf = DEFAULT_CONFIG.copy()
+    with open(CONFIG_FILE, "r") as f:
+        conf.update(json.loads(f.read()))
+
+    return conf
+
+
+def save_config(conf):
+    with open(CONFIG_FILE, "w") as f:
+        f.write(json.dumps(conf))
+
+
+def format_query(query, user):
+    return query.format(user=user)
+
+
+def date_from_string(s):
+    return datetime.datetime.strptime(s.strip(), DATE_FORMAT)
+
+
+def date_to_string(ts):
+    return ts.strftime(DATE_FORMAT)
+
+
+def get_changes(base_url, query):
+    conn = Connection(base_url)
+
+    raw_response = conn.request_get("/changes/",
+                                    args={"q": query},
+                                    headers={"Accept": "text/json"})
+
+    body = raw_response["body"]
+    responses = json.loads(body[body.find("["):])
+    for response in responses:
+        for field in ["created", "updated"]:
+            raw_ts = response[field][:-3]
+            ts = date_from_string(raw_ts)
+            response[field] = ts
+
+    return responses
+
+
+def save_time_stamp(ts):
+    #with open(TS_FILE, "w+") as f:
+    #    f.write(date_to_string(ts))
+    pass
+
+
+def load_time_stamp():
+    with open(TS_FILE, "r") as f:
+        return date_from_string(f.read())
+
+
+def install_service():
+    with open(AUTOSTART_PATH, "w") as f:
+        f.write(AUTOSTART_ENTRY)
+
+
+class GerritNotification(object):
+    def __init__(self, config):
+        self.check_interval = config["check_interval"]
+        self.notification_timeout = config["notification_timeout"]
+        self.base_url = config["base_url"]
+        self.query = format_query(config["query"], config["user"])
+        self.ts = load_time_stamp()
+        self._notifications = []
+
+    def check_updates(self):
+        changes = get_changes(self.base_url, self.query)
+        new_changes = ifilter(lambda item: item["updated"] > self.ts, changes)
+        new_ts = self.ts
+        for change in new_changes:
+            self.notify("New Gerrit Activity",
+                        change["subject"],
+                        self.base_url + "/" + str(change["_number"]),
+                        self.notification_timeout)
+            cts = change["updated"]
+            if cts > new_ts:
+                new_ts = cts
+
+        if self.ts != new_ts:
+            print "Updating timestamp..."
+            save_time_stamp(new_ts)
+            self.ts = new_ts
+
+        glib.timeout_add_seconds(self.check_interval, self.check_updates)
+
+    def go_url_cb(self, notification, name):
+        url = notification.url
+        subprocess.call(["xdg-open", url])
+        self.free_notification(notification)
+
+    def free_notification(self, n):
+        try:
+            self._notifications.remove(n)
+        except ValueError:
+            pass
+
+        n.close()
+
+    def notify(self, summery, message, url, timeout=None):
+        n = pynotify.Notification(summery, message)
+        if timeout is not None:
+            glib.timeout_add_seconds(timeout, self.free_notification, n)
+
+        n.url = url
+        n.set_urgency(pynotify.URGENCY_LOW)
+        n.add_action("gourl", "Go to URL", self.go_url_cb)
+        self._notifications.append(n)
+        n.show()
+
+
+def serve():
+    print "Loading configuration..."
+    try:
+        create_config_dir()
+    except Exception as e:
+        print "Could not create configuration dir: ", e
+        return 1
+
+    try:
+        config = load_config()
+    except Exception as e:
+        print "Could not read config file: ", e
+        return 1
+
+    base_url = config["base_url"]
+    if base_url is None or (not base_url):
+        print "'base_url' is not configured, please add it to '%s'" % (
+            CONFIG_FILE)
+        return 1
+
+    query = format_query(config["query"], config["user"])
+    print "Loading saved timestamp..."
+    try:
+        ts = load_time_stamp()
+    except Exception:
+        print "Timestamp not found, creating initial timestamp..."
+        last_change = max(get_changes(base_url, query),
+                          key=itemgetter('updated'))
+        ts = last_change['updated']
+        save_time_stamp(ts)
+
+    print "Starting to check for updates"
+    pynotify.init("gerrit-notify")
+
+    gn = GerritNotification(config)
+
+    loop = gobject.MainLoop()
+    glib.timeout_add_seconds(0, gn.check_updates)
+    loop.run()
+
+
+def configure_service():
+    try:
+        conf = load_config()
+    except:
+        conf = DEFAULT_CONFIG.copy()
+
+    for key, value in conf.items():
+        while True:
+            inp = raw_input("%s [%s]: " % (key, value))
+            inp = inp.strip()
+            if inp:
+                conf[key] = inp
+
+            end_val = conf[key]
+            if key == "base_url" and (end_val is None or end_val == ""):
+                print "base_url is mandatory"
+            else:
+                if conf[key] == DEFAULT_CONFIG[key]:
+                    del conf[key]
+
+                break
+
+    save_config(conf)
+
+
+def main():
+    try:
+        command = sys.argv[1]
+    except:
+        command = "serve"
+
+    if command == "configure":
+        return configure_service()
+    if command == "install":
+        return install_service()
+    elif command == "serve":
+        return serve()
+    else:
+        print "Unknown argument '%s'" % command
+
+
+if __name__ == "__main__":
+    exit(main())
