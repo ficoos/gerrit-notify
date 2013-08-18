@@ -17,7 +17,6 @@ import json
 import datetime
 import os
 import sys
-from operator import itemgetter
 from itertools import ifilter
 import errno
 import pwd
@@ -51,9 +50,9 @@ CONFIG_FILE = os.path.realpath(
 
 DEFAULT_CONFIG = {
     "user": pwd.getpwuid(os.getuid()).pw_name,
-    "query": "(owner:{user} OR reviewer:{user}) AND age:<1w",
+    "query": "(owner:{user} OR reviewer:{user}) AND NOT age:5m",
     "check_interval": 5,
-    "notification_timeout": 5,
+    "notification_timeout": 5 * 60,
     "base_url": None}
 
 
@@ -197,16 +196,11 @@ def serve():
             CONFIG_FILE)
         return 1
 
-    query = format_query(config["query"], config["user"])
     print "Loading saved timestamp..."
     try:
-        ts = load_time_stamp()
+        load_time_stamp()
     except Exception:
-        print "Timestamp not found, creating initial timestamp..."
-        last_change = max(get_changes(base_url, query),
-                          key=itemgetter('updated'))
-        ts = last_change['updated']
-        save_time_stamp(ts)
+        save_time_stamp(datetime.datetime(1900, 1, 1))
 
     print "Starting to check for updates"
     pynotify.init("gerrit-notify")
