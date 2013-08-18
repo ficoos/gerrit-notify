@@ -61,7 +61,7 @@ def load_config():
 
 
 def save_config(conf):
-    with open(CONFIG_FILE, "w") as f:
+    with open(CONFIG_FILE, "w+") as f:
         f.write(json.dumps(conf))
 
 
@@ -206,6 +206,12 @@ def serve():
 
 
 def configure_service():
+    try:
+        create_config_dir()
+    except Exception as e:
+        print "Could not create configuration dir: ", e
+        return 1
+
     try:
         conf = load_config()
     except:
