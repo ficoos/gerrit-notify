@@ -129,7 +129,7 @@ class GerritNotification(object):
         self.base_url = config["base_url"]
         self.query = format_query(config["query"], config["user"])
         self.ts = load_time_stamp()
-        self._notifications = []
+        self._notifications = {}
 
     def check_updates(self):
         changes = get_changes(self.base_url, self.query)
@@ -151,29 +151,26 @@ class GerritNotification(object):
 
         glib.timeout_add_seconds(self.check_interval, self.check_updates)
 
-    def go_url_cb(self, notification, name):
-        url = notification.url
+    def go_url_cb(self, n, url):
         subprocess.call(["xdg-open", url])
-        self.free_notification(notification)
+        self.close_cb(n, url)
 
-    def free_notification(self, n):
-        try:
-            self._notifications.remove(n)
-        except ValueError:
-            pass
-
-        n.close()
+    def close_cb(self, n, url):
+        if url in self._notifications:
+            self._notifications.pop(url).close()
 
     def notify(self, summery, message, url, timeout=None):
         n = pynotify.Notification(summery, message)
-        if timeout is not None:
-            glib.timeout_add_seconds(timeout, self.free_notification, n)
 
-        n.url = url
-        n.set_urgency(pynotify.URGENCY_LOW)
-        n.add_action("gourl", "Go to URL", self.go_url_cb)
-        self._notifications.append(n)
-        n.show()
+        if url not in self._notifications:
+            n.set_urgency(pynotify.URGENCY_LOW)
+            self._notifications[url] = n
+            n.add_action(url, "Go to URL", self.go_url_cb)
+            n.add_action(url, "Close", self.close_cb)
+            if timeout is not None:
+                glib.timeout_add_seconds(timeout,
+                                         self.close_cb, n, url)
+            n.show()
 
 
 def serve():
