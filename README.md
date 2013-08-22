@@ -1,7 +1,7 @@
 gerrit-notify
 =============
 Gerrit Notifier pulls your gerrit-server changes and popup notifications to your desktop when changes occurred. Such as reviews, comments, merges and inc. All those changes are refered to the configured query.
-Gerrit Notifier uses config file ([HOME_FOLDER]/.config/gerrit-notify/config). This file is configured automatically by the following command:
+Gerrit Notifier uses config file `$HOME/.config/gerrit-notify/config`. This file is configured automatically by the following command:
 `gerrit-notify configure`
 
 Installation
