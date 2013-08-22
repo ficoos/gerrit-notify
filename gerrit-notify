@@ -13,6 +13,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from python_rest_client.restful_lib import Connection
+from httplib2 import ServerNotFoundError
 import json
 import datetime
 import os
@@ -89,24 +90,6 @@ def date_to_string(ts):
     return ts.strftime(DATE_FORMAT)
 
 
-def get_changes(base_url, query):
-    conn = Connection(base_url)
-
-    raw_response = conn.request_get("/changes/",
-                                    args={"q": query},
-                                    headers={"Accept": "text/json"})
-
-    body = raw_response["body"]
-    responses = json.loads(body[body.find("["):])
-    for response in responses:
-        for field in ["created", "updated"]:
-            raw_ts = response[field][:-3]
-            ts = date_from_string(raw_ts)
-            response[field] = ts
-
-    return responses
-
-
 def save_time_stamp(ts):
     with open(TS_FILE, "w+") as f:
         f.write(date_to_string(ts))
@@ -122,40 +105,97 @@ def install_service():
         f.write(AUTOSTART_ENTRY)
 
 
+class GerritProxy(object):
+    def __init__(self, url):
+        self._gerrit_url = url
+        self._conn = None
+
+    def _connect(self):
+        try:
+            self._conn = Connection(self._gerrit_url)
+        except ServerNotFoundError as e:
+            print 'Failed connect: connection error %s' % e.message
+            raise
+        except Exception as e:
+            print 'Failed connect: unexpected exception: %s' % e.message
+            raise
+
+    def get_changes(self, query):
+        if self._conn is None:
+            self._connect()
+
+        try:
+            raw_response = self._conn.request_get("/changes/",
+                                                  args={"q": query},
+                                                  headers={"Accept":
+                                                           "text/json"})
+        except Exception as e:
+            print "Couldn't read updates: %s" % e.message
+            self._conn = None
+            raise
+
+        try:
+            body = raw_response["body"]
+        except KeyError:
+            print 'Failed in parsing body field'
+            raise
+
+        try:
+            responses = json.loads(body[body.find("["):])
+        except ValueError as e:
+            print "Failed to parse json response: %s" % e.message
+            raise
+
+        for response in responses:
+            for field in ["created", "updated"]:
+                try:
+                    raw_ts = response[field][:-3]
+                except KeyError:
+                    print 'Failed in parsing, %s field does not exist' % field
+                    raise
+                ts = date_from_string(raw_ts)
+                response[field] = ts
+
+        return responses
+
+
 class GerritNotification(object):
     def __init__(self, config):
+        self.base_url = config["base_url"]
+        self.api = GerritProxy(self.base_url)
         self.check_interval = config["check_interval"]
         self.notification_timeout = config["notification_timeout"]
-        self.base_url = config["base_url"]
         self.query = format_query(config["query"], config["user"])
         self.ts = load_time_stamp()
         self._notifications = {}
 
     def check_updates(self):
-        changes = get_changes(self.base_url, self.query)
-        new_changes = ifilter(lambda item: item["updated"] > self.ts, changes)
-        new_ts = self.ts
-        for change in new_changes:
-            self.notify("New Gerrit Activity",
-                        change["subject"],
-                        self.base_url + "/" + str(change["_number"]),
-                        self.notification_timeout)
-            cts = change["updated"]
-            if cts > new_ts:
-                new_ts = cts
+        try:
+            changes = self.api.get_changes(self.query)
+            new_changes = ifilter(lambda item:
+                                  item["updated"] > self.ts, changes)
+            new_ts = self.ts
+            for change in new_changes:
+                self.notify("New Gerrit Activity",
+                            change["subject"],
+                            self.base_url + "/" + str(change["_number"]),
+                            self.notification_timeout)
+                cts = change["updated"]
+                if cts > new_ts:
+                    new_ts = cts
 
-        if self.ts != new_ts:
-            print "Updating timestamp..."
-            save_time_stamp(new_ts)
-            self.ts = new_ts
-
-        glib.timeout_add_seconds(self.check_interval, self.check_updates)
+            if self.ts != new_ts:
+                print "Updating timestamp..."
+                save_time_stamp(new_ts)
+                self.ts = new_ts
+        finally:
+            glib.timeout_add_seconds(self.check_interval, self.check_updates)
 
     def go_url_cb(self, n, url):
         subprocess.call(["xdg-open", url])
         self.close_cb(n, url)
 
-    def close_cb(self, n, url):
+    def close_cb(self, url):
         if url in self._notifications:
             self._notifications.pop(url).close()
 
@@ -166,10 +206,9 @@ class GerritNotification(object):
             n.set_urgency(pynotify.URGENCY_LOW)
             self._notifications[url] = n
             n.add_action(url, "Go to URL", self.go_url_cb)
-            n.add_action(url, "Close", self.close_cb)
             if timeout is not None:
                 glib.timeout_add_seconds(timeout,
-                                         self.close_cb, n, url)
+                                         self.close_cb, url)
             n.show()
 
 
